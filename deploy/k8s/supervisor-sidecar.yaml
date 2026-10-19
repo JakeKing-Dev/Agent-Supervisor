@@ -1,0 +1,57 @@
+# The supervisor deployed as a sidecar next to an agent workload: same pod,
+# same lifecycle, its own scrape endpoint. Running it beside the agent rather
+# than as a central service keeps the control path local — if the supervisor
+# is unreachable, the agent it governs is down too, rather than running
+# unsupervised.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-with-supervisor
+  labels: { app: agent }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: agent }
+  template:
+    metadata:
+      labels: { app: agent }
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9464"
+        prometheus.io/path: "/metrics"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+      containers:
+        - name: supervisor
+          image: ghcr.io/OWNER/agent-supervisor:latest
+          ports:
+            - { name: metrics, containerPort: 9464 }
+          env:
+            - { name: METRICS_PORT, value: "9464" }
+          resources:
+            requests: { cpu: "25m", memory: "32Mi" }
+            limits:   { cpu: "200m", memory: "128Mi" }
+          livenessProbe:
+            httpGet: { path: /healthz, port: metrics }
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet: { path: /metrics, port: metrics }
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent-supervisor-metrics
+  labels: { app: agent }
+spec:
+  selector: { app: agent }
+  ports:
+    - { name: metrics, port: 9464, targetPort: metrics }

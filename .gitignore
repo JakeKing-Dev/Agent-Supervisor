@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+
+# Secrets — never commit
+.env
+*.pem
+*.key
+config.json
+secrets/
+
+# Local data
+*.db
+*.sqlite3
+recordings/
+data/

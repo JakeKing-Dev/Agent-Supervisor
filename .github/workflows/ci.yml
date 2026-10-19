@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: tests (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Run tests
+        run: PYTHONPATH=. python -m unittest discover -s tests -v
+
+  demo:
+    name: demo runs end to end
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Demo halts a looping agent
+        run: |
+          out=$(PYTHONPATH=. python examples/demo.py)
+          echo "$out"
+          echo "$out" | grep -q "HALTED at step" || { echo "demo did not halt"; exit 1; }
+
+  docker:
+    name: image builds and serves metrics
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: docker build -t agent-supervisor:ci .
+      - name: Run and scrape
+        run: |
+          docker run -d --name sup -p 9464:9464 -e STEP_DELAY=0.05 agent-supervisor:ci
+          for i in $(seq 1 30); do
+            if curl -sf localhost:9464/healthz >/dev/null; then break; fi
+            sleep 1
+          done
+          sleep 5
+          curl -sf localhost:9464/metrics | tee /tmp/m.txt
+          grep -q "agent_supervisor_steps_total" /tmp/m.txt
+          docker logs sup
+          docker rm -f sup
+
+  dashboard:
+    name: grafana dashboard is valid json
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python -c "import json;d=json.load(open('deploy/grafana/dashboards/supervisor.json'));print(d['title'], len(d['panels']), 'panels')"
