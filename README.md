@@ -1,5 +1,7 @@
 # supervisor
 
+![CI](https://github.com/JakeKing-Dev/Agent-Supervisor/actions/workflows/ci.yml/badge.svg)
+
 Runtime supervision for autonomous agents. Watches an agent's behaviour as it
 runs and halts it when the behaviour stops making sense — mechanically, with
 no model in the loop.
