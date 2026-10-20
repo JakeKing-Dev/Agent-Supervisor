@@ -70,5 +70,79 @@ class TestMetrics(unittest.TestCase):
             httpd.server_close()
 
 
+def _value(body: str, name: str) -> float:
+    """Sum one series across its label sets."""
+    total = 0.0
+    for line in body.splitlines():
+        if line.startswith("#") or not line.startswith(name):
+            continue
+        head, _, val = line.rpartition(" ")
+        if head == name or head.startswith(name + "{"):
+            total += float(val)
+    return total
+
+
+class TestHaltAccounting(unittest.TestCase):
+    """A halt is one event, however long the caller keeps observing it."""
+
+    def _frozen_run(self, extra_steps: int) -> str:
+        reg = MetricsRegistry()
+        sup = Supervisor(
+            SupervisorPolicy(persist_steps=2, savings_horizon=20),
+            task="loop",
+            metrics=reg,
+        )
+        actions = ["a", "b"] + ["stuck"] * (6 + extra_steps)
+        for i, a in enumerate(actions):
+            sup.observe(Step(index=i, action=a, cost=0.1))
+        self.assertTrue(sup.frozen, "fixture must freeze")
+        return reg.render()
+
+    def test_freeze_counted_once_however_many_verdicts_follow(self):
+        self.assertEqual(_value(self._frozen_run(0), "agent_supervisor_freezes_total"), 1.0)
+        self.assertEqual(_value(self._frozen_run(10), "agent_supervisor_freezes_total"), 1.0)
+
+    def test_prevented_spend_is_not_re_added_on_repeat_freezes(self):
+        short = _value(self._frozen_run(0), "agent_supervisor_cost_saved_total")
+        long = _value(self._frozen_run(10), "agent_supervisor_cost_saved_total")
+        self.assertGreater(short, 0.0, "a halt must report prevented spend")
+        self.assertAlmostEqual(short, long, places=6)
+
+    def test_prevented_spend_reflects_the_run_rate(self):
+        """0.1 per step over a 20-step horizon is about $2."""
+        saved = _value(self._frozen_run(0), "agent_supervisor_cost_saved_total")
+        self.assertAlmostEqual(saved, 2.0, places=6)
+
+    def test_horizon_of_zero_reports_nothing_rather_than_an_estimate(self):
+        reg = MetricsRegistry()
+        sup = Supervisor(
+            SupervisorPolicy(persist_steps=2, savings_horizon=0),
+            task="loop",
+            metrics=reg,
+        )
+        for i, a in enumerate(["a", "b"] + ["stuck"] * 6):
+            sup.observe(Step(index=i, action=a, cost=0.1))
+        self.assertTrue(sup.frozen)
+        self.assertEqual(_value(reg.render(), "agent_supervisor_cost_saved_total"), 0.0)
+
+
+class TestDashboardRoute(unittest.TestCase):
+    def test_dashboard_served_at_root_metrics_still_at_metrics(self):
+        reg = MetricsRegistry()
+        sup = Supervisor(SupervisorPolicy(persist_steps=2), task="ui", metrics=reg)
+        _run(sup, ["a", "b", "c"])
+        httpd = serve_metrics(reg, port=0, host="127.0.0.1")
+        try:
+            base = f"http://127.0.0.1:{httpd.server_address[1]}"
+            with urllib.request.urlopen(base + "/", timeout=5) as r:
+                self.assertIn("text/html", r.headers["Content-Type"])
+                self.assertIn("Agent Supervisor", r.read().decode())
+            with urllib.request.urlopen(base + "/metrics", timeout=5) as r:
+                self.assertIn("version=0.0.4", r.headers["Content-Type"])
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

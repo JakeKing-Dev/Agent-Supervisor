@@ -20,7 +20,7 @@ from .freeze import (
     RecoveryEvidence,
 )
 from .supervisor import Decision, Supervisor, SupervisorPolicy, Verdict
-from .metrics import MetricsRegistry, serve_metrics
+from .metrics import MetricsRegistry, dashboard_html, serve_metrics
 
 __all__ = [
     "Step",
@@ -40,6 +40,7 @@ __all__ = [
     "Verdict",
     "MetricsRegistry",
     "serve_metrics",
+    "dashboard_html",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.3.0"

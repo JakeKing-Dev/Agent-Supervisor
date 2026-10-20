@@ -36,6 +36,22 @@ jobs:
           echo "$out"
           echo "$out" | grep -q "HALTED at step" || { echo "demo did not halt"; exit 1; }
 
+  e2e:
+    name: dashboard end-to-end (playwright)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Playwright
+        run: |
+          python -m pip install --upgrade pip
+          pip install 'playwright>=1.44'
+          python -m playwright install --with-deps chromium
+      - name: Run end-to-end tests
+        run: PYTHONPATH=. python -m unittest discover -s e2e -v
+
   docker:
     name: image builds and serves metrics
     runs-on: ubuntu-latest
@@ -53,6 +69,8 @@ jobs:
           sleep 5
           curl -sf localhost:9464/metrics | tee /tmp/m.txt
           grep -q "agent_supervisor_steps_total" /tmp/m.txt
+          # the dashboard must ship inside the image, not just the repo
+          curl -sf localhost:9464/ | grep -q "Agent Supervisor"
           docker logs sup
           docker rm -f sup
 

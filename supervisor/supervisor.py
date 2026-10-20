@@ -38,6 +38,12 @@ class SupervisorPolicy:
     persist_steps: int = 3        # consecutive concerning steps before freezing
     max_cost: Optional[float] = None   # hard budget ceiling, freezes regardless
     freeze_on: tuple[Regime, ...] = (Regime.LOOPING, Regime.STALLED)
+    # On a freeze, prevented spend is estimated as the run's mean cost per
+    # step times this many steps. It is an estimate and labelled as one: the
+    # counterfactual is unknowable, but "it would have kept going at the rate
+    # it was going" is the assumption an operator can actually check. Set 0 to
+    # report nothing rather than an estimate.
+    savings_horizon: int = 20
 
 
 @dataclass
@@ -65,9 +71,15 @@ class Supervisor:
         self.trajectory = Trajectory(task=task)
         self.metrics = metrics      # optional MetricsRegistry; duck-typed
         self._streak = 0
+        # Once a run is halted, every further step keeps returning FREEZE. A
+        # halt must be counted once, not once per verdict: otherwise the halt
+        # counter spikes for as long as the caller keeps observing, and the
+        # prevented-spend estimate is re-added each time.
+        self._halt_reported = False
         self.history: list[Verdict] = []
 
-    def _publish(self, v: Verdict, cost_saved: float = 0.0) -> None:
+    def _publish(self, v: Verdict, *, cost_saved: float = 0.0,
+                 count_halt: bool = False) -> None:
         if self.metrics is None:
             return
         self.metrics.record(
@@ -76,7 +88,25 @@ class Supervisor:
             frozen=self.freezer.frozen,
             run_cost=self.trajectory.total_cost,
             cost_saved=cost_saved,
+            count_freeze=count_halt,
         )
+
+    def _publish_freeze(self, v: Verdict) -> None:
+        """Publish a FREEZE verdict, counting the halt only the first time."""
+        first = not self._halt_reported
+        self._halt_reported = True
+        self._publish(
+            v,
+            cost_saved=self._estimated_savings() if first else 0.0,
+            count_halt=first,
+        )
+
+    def _estimated_savings(self) -> float:
+        """Spend the run would likely have incurred had it not been halted."""
+        n = len(self.trajectory.steps)
+        if n == 0 or self.policy.savings_horizon <= 0:
+            return 0.0
+        return (self.trajectory.total_cost / n) * self.policy.savings_horizon
 
     def observe(self, step: Step) -> Verdict:
         self.trajectory.add(step)
@@ -90,7 +120,7 @@ class Supervisor:
             )
             v = Verdict(Decision.FREEZE, a, self._streak, "budget ceiling")
             self.history.append(v)
-            self._publish(v)
+            self._publish_freeze(v)
             return v
 
         concerning = a.concerning and a.score >= p.warn_score
@@ -116,7 +146,10 @@ class Supervisor:
 
         v = Verdict(decision, a, self._streak, note)
         self.history.append(v)
-        self._publish(v)
+        if decision is Decision.FREEZE:
+            self._publish_freeze(v)
+        else:
+            self._publish(v)
         return v
 
     # ---- convenience -------------------------------------------------------
@@ -129,6 +162,7 @@ class Supervisor:
         ok, why = self.freezer.attempt_unfreeze(evidence)
         if ok:
             self._streak = 0
+            self._halt_reported = False   # a later halt is a new halt
         return ok, why
 
     def replay(self, traj: Trajectory) -> Optional[int]:

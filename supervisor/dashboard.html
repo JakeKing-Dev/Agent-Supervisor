@@ -1,0 +1,208 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Supervisor</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --panel: #f6f7f9;
+    --line: #e3e6ea;
+    --ink: #16191d;
+    --dim: #5c636d;
+    --ok: #1a7f4b;
+    --warn: #b06a00;
+    --bad: #b3261e;
+    --frozen: #5b2a86;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0f1216; --panel: #171b21; --line: #272d36;
+      --ink: #e8eaed; --dim: #9aa3ad;
+      --ok: #4ec98a; --warn: #e5a33a; --bad: #ff6b60; --frozen: #c39bf0;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0f1216; --panel: #171b21; --line: #272d36;
+    --ink: #e8eaed; --dim: #9aa3ad;
+    --ok: #4ec98a; --warn: #e5a33a; --bad: #ff6b60; --frozen: #c39bf0;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    padding: 24px 16px;
+  }
+  .wrap { max-width: 980px; margin: 0 auto; }
+  h1 { font-size: 19px; margin: 0 0 2px; letter-spacing: -0.01em; }
+  .sub { color: var(--dim); font-size: 13px; margin-bottom: 20px; }
+  .totals { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 20px; }
+  .tile {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 12px 14px; min-width: 132px; flex: 1 1 132px;
+  }
+  .tile .k { color: var(--dim); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  .tile .v { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; margin-top: 3px; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td {
+    text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--line);
+    font-variant-numeric: tabular-nums;
+  }
+  th { color: var(--dim); font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+  .regime { font-weight: 600; }
+  .regime[data-regime="healthy"]   { color: var(--ok); }
+  .regime[data-regime="wandering"] { color: var(--warn); }
+  .regime[data-regime="looping"],
+  .regime[data-regime="stalled"]   { color: var(--bad); }
+  .regime[data-regime="unknown"]   { color: var(--dim); }
+  .frozen-yes { color: var(--frozen); font-weight: 600; }
+  .frozen-no { color: var(--dim); }
+  .bar { height: 5px; border-radius: 3px; background: var(--line); overflow: hidden; margin-top: 5px; }
+  .bar > i { display: block; height: 100%; background: var(--ok); }
+  .bar > i[data-level="warn"] { background: var(--warn); }
+  .bar > i[data-level="bad"] { background: var(--bad); }
+  .empty { color: var(--dim); padding: 28px 10px; text-align: center; }
+  footer { color: var(--dim); font-size: 12px; margin-top: 18px; }
+  @media (max-width: 560px) { .hide-sm { display: none; } }
+</style>
+
+<div class="wrap">
+  <h1>Agent Supervisor</h1>
+  <div class="sub" id="status" data-testid="status">connecting…</div>
+
+  <div class="totals">
+    <div class="tile"><div class="k">Steps</div><div class="v" id="t-steps" data-testid="total-steps">—</div></div>
+    <div class="tile"><div class="k">Halted</div><div class="v" id="t-freezes" data-testid="total-freezes">—</div></div>
+    <div class="tile"><div class="k">Frozen now</div><div class="v" id="t-frozen" data-testid="total-frozen">—</div></div>
+    <div class="tile"><div class="k">Spend prevented</div><div class="v" id="t-saved" data-testid="total-saved">—</div></div>
+  </div>
+
+  <table data-testid="agents">
+    <thead>
+      <tr>
+        <th>Task</th>
+        <th>Regime</th>
+        <th>Drift</th>
+        <th class="hide-sm">Steps</th>
+        <th class="hide-sm">Cost</th>
+        <th>Frozen</th>
+      </tr>
+    </thead>
+    <tbody id="rows"></tbody>
+  </table>
+  <div class="empty" id="empty" data-testid="empty" hidden>No agents observed yet.</div>
+
+  <footer>Polling <code>/metrics</code> every 2s · <span id="stamp" data-testid="stamp">—</span></footer>
+</div>
+
+<script>
+// Minimal Prometheus text-format parser. No dependencies, same as the library.
+function parseMetrics(text) {
+  const out = [];
+  for (const line of text.split("\n")) {
+    if (!line || line[0] === "#") continue;
+    const m = line.match(/^([a-zA-Z_:][a-zA-Z0-9_:]*)(\{[^}]*\})?\s+(-?[\d.eE+]+)$/);
+    if (!m) continue;
+    const labels = {};
+    if (m[2]) {
+      for (const pair of m[2].slice(1, -1).matchAll(/([a-zA-Z_][a-zA-Z0-9_]*)="((?:[^"\\]|\\.)*)"/g)) {
+        labels[pair[1]] = pair[2].replace(/\\"/g, '"').replace(/\\n/g, "\n").replace(/\\\\/g, "\\");
+      }
+    }
+    out.push({ name: m[1], labels, value: parseFloat(m[3]) });
+  }
+  return out;
+}
+
+function level(score) { return score >= 0.7 ? "bad" : score >= 0.5 ? "warn" : "ok"; }
+
+function render(samples) {
+  const tasks = new Map();
+  const task = (t) => {
+    if (!tasks.has(t)) tasks.set(t, { task: t, regime: "unknown", score: 0, steps: 0, cost: 0, frozen: false });
+    return tasks.get(t);
+  };
+  let totalSteps = 0, totalFreezes = 0, totalFrozen = 0, totalSaved = 0;
+
+  for (const s of samples) {
+    const t = s.labels.task;
+    switch (s.name) {
+      case "agent_supervisor_steps_total": task(t).steps = s.value; totalSteps += s.value; break;
+      case "agent_supervisor_drift_score": task(t).score = s.value; break;
+      case "agent_supervisor_run_cost": task(t).cost = s.value; break;
+      case "agent_supervisor_frozen": task(t).frozen = s.value === 1; totalFrozen += s.value; break;
+      case "agent_supervisor_regime": if (s.value === 1) task(t).regime = s.labels.regime; break;
+      case "agent_supervisor_freezes_total": totalFreezes += s.value; break;
+      case "agent_supervisor_cost_saved_total": totalSaved += s.value; break;
+    }
+  }
+
+  document.getElementById("t-steps").textContent = totalSteps;
+  document.getElementById("t-freezes").textContent = totalFreezes;
+  document.getElementById("t-frozen").textContent = totalFrozen;
+  document.getElementById("t-saved").textContent = "$" + totalSaved.toFixed(2);
+
+  const rows = [...tasks.values()].sort((a, b) => b.score - a.score || a.task.localeCompare(b.task));
+  const tbody = document.getElementById("rows");
+  tbody.textContent = "";
+  for (const r of rows) {
+    const tr = document.createElement("tr");
+    tr.setAttribute("data-testid", "agent-row");
+    tr.setAttribute("data-task", r.task);
+
+    const td = (cls) => { const e = document.createElement("td"); if (cls) e.className = cls; tr.appendChild(e); return e; };
+
+    td().textContent = r.task;
+
+    const reg = td();
+    const span = document.createElement("span");
+    span.className = "regime";
+    span.setAttribute("data-regime", r.regime);
+    span.setAttribute("data-testid", "regime");
+    span.textContent = r.regime;
+    reg.appendChild(span);
+
+    const sc = td();
+    const num = document.createElement("div");
+    num.setAttribute("data-testid", "score");
+    num.textContent = r.score.toFixed(2);
+    sc.appendChild(num);
+    const bar = document.createElement("div");
+    bar.className = "bar";
+    const fill = document.createElement("i");
+    fill.style.width = Math.round(Math.min(1, Math.max(0, r.score)) * 100) + "%";
+    fill.setAttribute("data-level", level(r.score));
+    bar.appendChild(fill);
+    sc.appendChild(bar);
+
+    td("hide-sm").textContent = r.steps;
+    td("hide-sm").textContent = "$" + r.cost.toFixed(2);
+
+    const fz = td();
+    fz.className = r.frozen ? "frozen-yes" : "frozen-no";
+    fz.setAttribute("data-testid", "frozen");
+    fz.textContent = r.frozen ? "FROZEN" : "—";
+
+    tbody.appendChild(tr);
+  }
+
+  document.getElementById("empty").hidden = rows.length > 0;
+  document.getElementById("stamp").textContent = new Date().toLocaleTimeString();
+}
+
+async function tick() {
+  const el = document.getElementById("status");
+  try {
+    const res = await fetch("/metrics", { cache: "no-store" });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    render(parseMetrics(await res.text()));
+    el.textContent = "live";
+    el.setAttribute("data-state", "live");
+  } catch (e) {
+    el.textContent = "metrics endpoint unreachable — " + e.message;
+    el.setAttribute("data-state", "error");
+  }
+}
+
+tick();
+setInterval(tick, 2000);
+</script>

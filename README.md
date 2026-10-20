@@ -31,7 +31,6 @@ early detection. That's the open measurement (see below).
 No dependencies. Python 3.10+.
 
 ```bash
-PYTHONPATH=. python3 -m unittest discover -s tests   # 22 tests
 PYTHONPATH=. python3 examples/demo.py                # watch an agent get halted
 ```
 
@@ -41,7 +40,7 @@ PYTHONPATH=. python3 examples/demo.py                # watch an agent get halted
 docker compose up --build
 ```
 
-- supervisor — http://localhost:9464/metrics
+- supervisor — http://localhost:9464/ (operator dashboard), `/metrics`, `/healthz`
 - Prometheus — http://localhost:9090
 - Grafana — http://localhost:3000 (dashboard provisioned, anonymous access on)
 
@@ -53,6 +52,41 @@ As a Kubernetes sidecar: `kubectl apply -f deploy/k8s/supervisor-sidecar.yaml`.
 It deploys beside the agent in the same pod rather than as a central service,
 so that an unreachable supervisor means the agent is down too, rather than the
 agent running unsupervised.
+
+## Operator dashboard
+
+`http://localhost:9464/` serves a single page listing every supervised task
+with its regime, drift score, step count, spend and freeze state, worst first.
+
+It is static HTML served from the same stdlib endpoint as the metrics, and it
+reads `/metrics` in the browser and parses the exposition format there. No
+frontend toolchain, no second process, and no second source of truth: the
+page and Prometheus read the same bytes. Grafana remains the right tool for
+history and alerting — this is for the question "what is happening right now",
+which is the one you ask before deciding whether to halt something.
+
+A degrading agent turns red and then FROZEN on an already-open page, without a
+reload. That path is covered by the end-to-end tests below.
+
+## Tests
+
+```bash
+PYTHONPATH=. python3 -m unittest discover -s tests   # 27 unit tests, no deps
+```
+
+End-to-end tests drive the dashboard in a real browser. They live outside
+`tests/` so the unit suite stays runnable on a bare interpreter:
+
+```bash
+pip install 'playwright>=1.44' && playwright install chromium
+PYTHONPATH=. python3 -m unittest discover -s e2e     # 15 tests
+```
+
+They assert that the page is *driven by* live metrics, not merely that it
+renders: each test seeds a known supervisor state, serves it, and checks the
+browser agrees — including after the state changes underneath an open page,
+and that the page says so visibly when the metrics endpoint goes away rather
+than showing numbers that have quietly stopped moving.
 
 ## Metrics
 
@@ -71,7 +105,17 @@ adopts it.
 | `agent_supervisor_run_cost` | gauge | spend this run |
 | `agent_supervisor_cost_saved_total` | counter | spend prevented by halting |
 
-That last one is the series anyone paying for this will look at first.
+That last one is the series anyone paying for this will look at first, so it
+is worth saying exactly what it means. On a halt, prevented spend is estimated
+as the run's mean cost per step times `savings_horizon` (default 20 steps).
+The true counterfactual is unknowable; "it would have continued at the rate it
+was going" is an assumption an operator can at least check. Set
+`savings_horizon=0` to report nothing rather than an estimate.
+
+A halted run keeps producing FREEZE verdicts for as long as the caller keeps
+observing it, so both `freezes_total` and `cost_saved_total` count once per
+halt rather than once per verdict — otherwise `rate()` on that counter
+measures how chatty the caller is rather than how often agents are stopped.
 
 ## Use
 
@@ -161,9 +205,10 @@ exactly that experiment.
 
 ## Status
 
-v0.2.0. Detector, freeze manager, policy layer and metrics are implemented
-and tested (22 tests, CI on Python 3.10-3.13). Containerised, with Prometheus
-scraping and a provisioned Grafana dashboard.
+v0.3.0. Detector, freeze manager, policy layer, metrics and operator dashboard
+are implemented and tested — 27 unit tests plus 15 Playwright end-to-end tests,
+CI on Python 3.10-3.13. Containerised, with Prometheus scraping and a
+provisioned Grafana dashboard.
 
 Reconciliation, the promotion ladder and calibration are designed but not
 built. Validation against production traffic has not been done.

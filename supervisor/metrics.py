@@ -26,6 +26,11 @@ from collections import defaultdict
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Iterable, Optional
 
+try:  # py3.9+ has importlib.resources.files
+    from importlib.resources import files as _res_files
+except ImportError:  # pragma: no cover
+    _res_files = None  # type: ignore[assignment]
+
 from .detector import Regime
 from .supervisor import Decision, Verdict
 
@@ -65,7 +70,16 @@ class MetricsRegistry:
         frozen: bool = False,
         run_cost: float = 0.0,
         cost_saved: float = 0.0,
+        count_freeze: bool = True,
     ) -> None:
+        """Record one verdict.
+
+        `count_freeze` exists because a halted run keeps producing FREEZE
+        verdicts for as long as anyone keeps observing it. `freezes_total` is
+        meant to count halts, so the caller passes False for the repeats —
+        otherwise `rate()` on that counter measures how chatty the caller is
+        rather than how often agents are being stopped.
+        """
         with self._lock:
             self._steps[task] += 1
             self._verdicts[(task, verdict.decision.value)] += 1
@@ -73,7 +87,7 @@ class MetricsRegistry:
             self._regime[task] = verdict.assessment.regime.value
             self._frozen[task] = frozen
             self._cost[task] = run_cost
-            if verdict.decision is Decision.FREEZE:
+            if verdict.decision is Decision.FREEZE and count_freeze:
                 self._freezes[(task, verdict.assessment.regime.value)] += 1
                 self._saved[task] += cost_saved
 
@@ -138,25 +152,57 @@ class MetricsRegistry:
         return "\n".join(out) + "\n"
 
 
+_DASHBOARD_CACHE: Optional[bytes] = None
+
+
+def dashboard_html() -> bytes:
+    """The operator dashboard, as bytes. Read once, then cached.
+
+    A static page served from the same endpoint as the metrics, so the
+    supervisor has an operator view with no extra process to run and no
+    frontend toolchain. It reads `/metrics` in the browser and parses the
+    exposition format there — the same format Prometheus reads, so there is
+    no second source of truth to drift.
+    """
+    global _DASHBOARD_CACHE
+    if _DASHBOARD_CACHE is None:
+        if _res_files is not None:
+            _DASHBOARD_CACHE = (
+                _res_files(__package__).joinpath("dashboard.html").read_bytes()
+            )
+        else:  # pragma: no cover
+            import os
+
+            path = os.path.join(os.path.dirname(__file__), "dashboard.html")
+            with open(path, "rb") as fh:
+                _DASHBOARD_CACHE = fh.read()
+    return _DASHBOARD_CACHE
+
+
 class _Handler(BaseHTTPRequestHandler):
     registry: MetricsRegistry
 
+    def _send(self, code: int, body: bytes, content_type: str) -> None:
+        self.send_response(code)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self):  # noqa: N802
-        if self.path.rstrip("/") in ("/metrics", ""):
-            body = self.registry.render().encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "text/plain; version=0.0.4")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-        elif self.path.rstrip("/") == "/healthz":
-            self.send_response(200)
-            self.send_header("Content-Length", "2")
-            self.end_headers()
-            self.wfile.write(b"ok")
+        path = self.path.split("?", 1)[0].rstrip("/")
+        if path == "/metrics":
+            self._send(
+                200,
+                self.registry.render().encode(),
+                "text/plain; version=0.0.4; charset=utf-8",
+            )
+        elif path in ("", "/ui"):
+            self._send(200, dashboard_html(), "text/html; charset=utf-8")
+        elif path == "/healthz":
+            self._send(200, b"ok", "text/plain; charset=utf-8")
         else:
-            self.send_response(404)
-            self.end_headers()
+            self._send(404, b"not found\n", "text/plain; charset=utf-8")
 
     def log_message(self, *args):  # silence per-request logging
         pass

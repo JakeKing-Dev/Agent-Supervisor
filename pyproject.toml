@@ -4,10 +4,18 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "supervisor"
-version = "0.1.0"
+version = "0.3.0"
 description = "Runtime supervision for autonomous agents"
 requires-python = ">=3.10"
 dependencies = []
 
+[project.optional-dependencies]
+# End-to-end tests only. The library itself has no dependencies, and the unit
+# suite needs none either.
+e2e = ["playwright>=1.44"]
+
 [tool.setuptools.packages.find]
 include = ["supervisor*"]
+
+[tool.setuptools.package-data]
+supervisor = ["dashboard.html"]
